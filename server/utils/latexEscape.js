@@ -7,9 +7,20 @@
  */
 export function latexEscape(input) {
   if (input == null) return '';
-  
+
   return String(input)
-    // Backslash must be first to avoid double-escaping
+    // Typographic Unicode → ASCII equivalents. Run BEFORE the LaTeX special-char
+    // escaping so substitutions don't interfere, and BEFORE the ASCII-only safety
+    // net at the end so known chars are preserved.
+    .replace(/[‘’]/g, "'") // Smart single quotes
+    .replace(/[“”]/g, '"') // Smart double quotes
+    .replace(/–/g, '--') // En dash
+    .replace(/—/g, '---') // Em dash
+    .replace(/…/g, '...') // Ellipsis
+    .replace(/[‐‑‒]/g, '-') // Hyphen, non-breaking hyphen, figure dash
+    .replace(/[    ]/g, ' ') // NBSP, thin/hair/narrow-no-break space
+    .replace(/[­​‌‍﻿]/g, '') // Soft hyphen, zero-width chars, BOM
+    // LaTeX special chars — backslash first to avoid double-escaping.
     .replace(/\\/g, '\\textbackslash{}')
     .replace(/%/g, '\\%')
     .replace(/&/g, '\\&')
@@ -20,18 +31,13 @@ export function latexEscape(input) {
     .replace(/\}/g, '\\}')
     .replace(/~/g, '\\textasciitilde{}')
     .replace(/\^/g, '\\textasciicircum{}')
-    // Additional problematic characters
     .replace(/</g, '\\textless{}')
     .replace(/>/g, '\\textgreater{}')
     .replace(/\|/g, '\\textbar{}')
-    // Remove or escape control characters and problematic Unicode
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '') // Remove control chars
-    .replace(/[\u2018\u2019]/g, "'") // Smart quotes to regular
-    .replace(/[\u201C\u201D]/g, '"') // Smart double quotes to regular
-    .replace(/\u2013/g, '--') // En dash
-    .replace(/\u2014/g, '---') // Em dash
-    .replace(/\u2026/g, '...') // Ellipsis
-    .replace(/\u00A0/g, ' '); // Non-breaking space to regular space
+    // Safety net: drop everything outside printable ASCII + tab/newline.
+    // pdflatex's preamble has no inputenc — any leftover non-ASCII char would
+    // fail compilation. This also covers the control-char range.
+    .replace(/[^\x09\x0A\x20-\x7E]/g, '');
 }
 
 /**
@@ -59,15 +65,15 @@ export function latexEscapeUrl(url) {
  */
 export function truncateAtWord(text, maxLength = 200) {
   if (!text || text.length <= maxLength) return text;
-  
+
   // Find last space before maxLength
   const truncated = text.substring(0, maxLength);
   const lastSpace = truncated.lastIndexOf(' ');
-  
+
   if (lastSpace > maxLength * 0.7) {
     return truncated.substring(0, lastSpace);
   }
-  
+
   return truncated;
 }
 

@@ -51,6 +51,37 @@ describe('latexEscape', () => {
     expect(latexEscape('\x0B')).toBe('');
   });
 
+  test('converts typographic hyphens to ASCII hyphen', () => {
+    expect(latexEscape('a‐b')).toBe('a-b'); // hyphen
+    expect(latexEscape('a‑b')).toBe('a-b'); // non-breaking hyphen
+    expect(latexEscape('a‒b')).toBe('a-b'); // figure dash
+    expect(latexEscape('enterprise‑grade')).toBe('enterprise-grade');
+  });
+
+  test('converts exotic space characters to regular space', () => {
+    expect(latexEscape('a b')).toBe('a b'); // thin space
+    expect(latexEscape('a b')).toBe('a b'); // hair space
+    expect(latexEscape('a b')).toBe('a b'); // narrow no-break space
+    expect(latexEscape('media streaming back-end')).toBe('media streaming back-end');
+  });
+
+  test('strips soft hyphen and zero-width characters', () => {
+    expect(latexEscape('a­b')).toBe('ab'); // soft hyphen
+    expect(latexEscape('a​b')).toBe('ab'); // zero-width space
+    expect(latexEscape('a‌b')).toBe('ab'); // zero-width non-joiner
+    expect(latexEscape('a‍b')).toBe('ab'); // zero-width joiner
+    expect(latexEscape('﻿hello')).toBe('hello'); // BOM
+  });
+
+  test('ASCII safety net strips unhandled non-ASCII characters', () => {
+    // Accented characters (trade-off: no explicit mapping, they get stripped)
+    expect(latexEscape('Héctor')).toBe('Hctor');
+    // Emojis
+    expect(latexEscape('hi \u{1F680} there')).toBe('hi  there');
+    // CJK
+    expect(latexEscape('test中文end')).toBe('testend');
+  });
+
   test('handles null and undefined', () => {
     expect(latexEscape(null)).toBe('');
     expect(latexEscape(undefined)).toBe('');
