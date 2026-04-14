@@ -2,55 +2,46 @@
  * PDF Parser Service
  * Extracts text content from uploaded PDF files
  */
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+import { PDFParse } from 'pdf-parse';
 
-/**
- * Extract text from a PDF buffer
- * @param {Buffer} pdfBuffer - The PDF file as a buffer
- * @returns {Promise<string>} - Extracted text content
- */
 export async function extractText(pdfBuffer) {
+  const parser = new PDFParse({ data: pdfBuffer });
   try {
-    const data = await pdfParse(pdfBuffer);
-    let text = data.text || '';
+    const result = await parser.getText();
+    let text = result.text || '';
 
-    // Clean up the extracted text
-    // Normalize whitespace (multiple spaces/newlines to single)
     text = text.replace(/[ \t]+/g, ' ');
     text = text.replace(/\n{3,}/g, '\n\n');
-
-    // Trim each line
     text = text.split('\n').map(line => line.trim()).join('\n');
-
-    // Remove empty lines at start/end
     text = text.trim();
 
     return text;
   } catch (error) {
     console.error('PDF extraction error:', error);
     throw new Error('Failed to extract text from PDF: ' + error.message);
+  } finally {
+    await parser.destroy();
   }
 }
 
-/**
- * Get PDF metadata
- * @param {Buffer} pdfBuffer - The PDF file as a buffer
- * @returns {Promise<Object>} - PDF metadata
- */
 export async function getMetadata(pdfBuffer) {
+  const parser = new PDFParse({ data: pdfBuffer });
   try {
-    const data = await pdfParse(pdfBuffer);
+    const [infoResult, textResult] = await Promise.all([
+      parser.getInfo(),
+      parser.getText(),
+    ]);
 
     return {
-      pages: data.numpages,
-      info: data.info,
-      textLength: (data.text || '').length,
+      pages: infoResult.total,
+      info: infoResult.info,
+      textLength: (textResult.text || '').length,
     };
   } catch (error) {
     console.error('PDF metadata error:', error);
     throw new Error('Failed to read PDF metadata: ' + error.message);
+  } finally {
+    await parser.destroy();
   }
 }
 
