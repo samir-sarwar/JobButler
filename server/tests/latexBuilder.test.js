@@ -173,4 +173,115 @@ describe('latexBuilder.build', () => {
     expect(latex).toContain('AI Chat Bot');
     expect(latex).toContain('\\emph{');
   });
+
+  test('buildEducation deduplicates entries sharing title and organization', () => {
+    const experiences = [
+      makeExperience({ id: '1', type: 'education', title: 'BS Computer Science', organization: 'MIT', bullets: [] }),
+      makeExperience({ id: '2', type: 'education', title: 'BS Computer Science', organization: 'MIT', bullets: [] }),
+      makeExperience({ id: '3', type: 'education', title: 'MS Computer Science', organization: 'MIT', bullets: [] }),
+    ];
+    const user = makeUser();
+    const latex = build(experiences, {}, {}, user);
+
+    // Count only \resumeSubheading calls in the body (after \begin{document}), not the preamble \newcommand definition
+    const body = latex.slice(latex.indexOf('\\begin{document}'));
+    const matches = (body.match(/\\resumeSubheading/g) || []).length;
+    expect(matches).toBe(2);
+  });
+
+  test('buildProjects caps tags at 4 and puts JD matches first', () => {
+    const experiences = [
+      makeExperience({
+        id: '1',
+        type: 'project',
+        title: 'My Project',
+        tags: ['Go', 'Docker', 'Python', 'React', 'Kubernetes', 'Redis'],
+        bullets: [{ text: 'Did stuff' }],
+      }),
+    ];
+    const user = makeUser();
+    const keywords = { hardSkills: ['Python', 'Redis'], roleKeywords: [] };
+    const latex = build(experiences, {}, {}, user, keywords);
+
+    const emMatch = latex.match(/\\emph\{([^}]+)\}/);
+    expect(emMatch).not.toBeNull();
+    const tags = emMatch[1].split(',').map(s => s.trim());
+    expect(tags.length).toBe(4);
+    expect(tags[0]).toBe('Python');
+    expect(tags[1]).toBe('Redis');
+  });
+
+  test('buildSkills emits exactly 3 \\textbf lines and picks Databases when JD hardSkills includes PostgreSQL', () => {
+    const experiences = [
+      makeExperience({
+        id: '1',
+        type: 'skill',
+        title: 'Skills',
+        bullets: [],
+        tags: ['Python', 'React', 'PostgreSQL', 'Jest', 'Git'],
+      }),
+    ];
+    const user = makeUser();
+    const keywords = { hardSkills: ['PostgreSQL'], roleKeywords: [] };
+    const latex = build(experiences, {}, {}, user, keywords);
+
+    const textbfMatches = (latex.match(/\\textbf\{[^}]+\}\{:/g) || []);
+    expect(textbfMatches.length).toBe(3);
+    expect(latex).toContain('\\textbf{Databases}');
+  });
+
+  test('buildSkills picks Testing when JD hardSkills includes Jest', () => {
+    const experiences = [
+      makeExperience({
+        id: '1',
+        type: 'skill',
+        title: 'Skills',
+        bullets: [],
+        tags: ['Python', 'React', 'Jest', 'Git'],
+      }),
+    ];
+    const user = makeUser();
+    const keywords = { hardSkills: ['Jest'], roleKeywords: [] };
+    const latex = build(experiences, {}, {}, user, keywords);
+
+    expect(latex).toContain('\\textbf{Testing}');
+  });
+
+  test('buildSkills falls back to Developer Tools when no DB or testing keywords in JD', () => {
+    const experiences = [
+      makeExperience({
+        id: '1',
+        type: 'skill',
+        title: 'Skills',
+        bullets: [],
+        tags: ['Python', 'React', 'Git', 'Docker'],
+      }),
+    ];
+    const user = makeUser();
+    const keywords = { hardSkills: ['Python'], roleKeywords: [] };
+    const latex = build(experiences, {}, {}, user, keywords);
+
+    expect(latex).toContain('\\textbf{Developer Tools}');
+  });
+
+  test('build() section order is Education then Technical Skills then Experience then Projects', () => {
+    const experiences = [
+      makeExperience({ id: '1', type: 'education', title: 'BS CS', organization: 'MIT', bullets: [] }),
+      makeExperience({ id: '2', type: 'work' }),
+      makeExperience({ id: '3', type: 'project', title: 'My App', bullets: [{ text: 'Did work' }] }),
+      makeExperience({ id: '4', type: 'skill', title: 'S', bullets: [], tags: ['Python', 'React', 'Git'] }),
+    ];
+    const user = makeUser();
+    const keywords = { hardSkills: ['Python'], roleKeywords: [] };
+    const latex = build(experiences, {}, {}, user, keywords);
+
+    const eduIdx = latex.indexOf('\\section{Education}');
+    const skillsIdx = latex.indexOf('\\section{Technical Skills}');
+    const expIdx = latex.indexOf('\\section{Experience}');
+    const projIdx = latex.indexOf('\\section{Projects}');
+
+    expect(eduIdx).toBeLessThan(skillsIdx);
+    expect(skillsIdx).toBeLessThan(expIdx);
+    expect(expIdx).toBeLessThan(projIdx);
+  });
 });

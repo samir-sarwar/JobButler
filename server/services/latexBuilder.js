@@ -1,4 +1,12 @@
 import { latexEscape, latexEscapeUrl, truncateAtWord, boldKeywords } from '../utils/latexEscape.js';
+import { reorderTags } from '../utils/skillsTailoring.js';
+
+const LANG_LIST = ['python', 'java', 'javascript', 'typescript', 'go', 'rust', 'c', 'c++', 'c#', 'sql', 'kotlin', 'swift', 'ruby', 'php', 'scala', 'r', 'bash', 'shell'];
+const FRAMEWORK_LIST = ['react', 'vue', 'angular', 'node', 'express', 'django', 'flask', 'fastapi', 'spring', 'rails', 'next.js', 'nest', 'kubernetes', 'docker', 'aws', 'gcp', 'azure', 'kafka', 'terraform', 'graphql', 'rest', 'grpc'];
+const DB_LIST = ['postgres', 'postgresql', 'mysql', 'mongodb', 'redis', 'dynamodb', 'sqlite', 'cassandra', 'elasticsearch'];
+const TESTING_LIST = ['jest', 'mocha', 'pytest', 'cypress', 'selenium', 'junit', 'tdd', 'bdd', 'testing', 'integration test', 'unit test'];
+
+const SAMPLE_PROJECT_BLOCKLIST = ['gitlytics', 'simple paintball', 'jake ryan', 'sourabh bajaj'];
 
 /**
  * Jake's Resume LaTeX template preamble - EXACT match to sample.tex
@@ -176,13 +184,21 @@ function buildEducation(educationEntries) {
   if (!educationEntries || educationEntries.length === 0) {
     return '';
   }
-  
+
+  const seen = new Set();
+  const deduped = educationEntries.filter(edu => {
+    const key = `${(edu.title || '').toLowerCase().trim()}::${(edu.organization || '').toLowerCase().trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   let section = `%-----------EDUCATION-----------
 \\section{Education}
   \\resumeSubHeadingListStart
 `;
-  
-  educationEntries.forEach(edu => {
+
+  deduped.forEach(edu => {
     const title = latexEscape(edu.title);
     const organization = latexEscape(edu.organization || '');
     const location = latexEscape(edu.location || '');
@@ -279,20 +295,33 @@ function buildExperience(workEntries, rewrittenMap, boldList) {
  * @param {Array} projectEntries - Project experience documents
  * @param {Object} rewrittenMap - Map of experience ID to rewritten bullets
  * @param {string[]} boldList - Keywords to bold in bullet text
+ * @param {{hardSkills?: string[], roleKeywords?: string[]}} [keywords]
  */
-function buildProjects(projectEntries, rewrittenMap, boldList) {
+function buildProjects(projectEntries, rewrittenMap, boldList, keywords) {
   if (!projectEntries || projectEntries.length === 0) {
     return '';
   }
-  
+
+  const jdKeywords = [
+    ...((keywords && keywords.hardSkills) || []),
+    ...((keywords && keywords.roleKeywords) || []),
+  ];
+
   let section = `%-----------PROJECTS-----------
 \\section{Projects}
     \\resumeSubHeadingListStart
 `;
-  
+
   projectEntries.forEach(proj => {
+    const titleLower = (proj.title || '').toLowerCase();
+    if (SAMPLE_PROJECT_BLOCKLIST.some(t => titleLower.includes(t))) {
+      console.warn(`buildProjects: sample template entry detected — title="${proj.title}". Remove from vault.`);
+    }
     const title = latexEscape(proj.title);
-    const tags = (proj.tags || []).map(t => latexEscape(t)).join(', ');
+    const orderedTags = jdKeywords.length > 0
+      ? reorderTags(proj.tags || [], jdKeywords).slice(0, 4)
+      : (proj.tags || []).slice(0, 4);
+    const tags = orderedTags.map(t => latexEscape(t)).join(', ');
     const dateRange = formatDateRange(proj.startDate, proj.endDate);
     
     // Format: \textbf{Title} $|$ \emph{tags}
@@ -337,63 +366,113 @@ function buildProjects(projectEntries, rewrittenMap, boldList) {
   return section;
 }
 
+function matchesList(skill, list) {
+  const s = skill.toLowerCase().trim();
+  return list.some(item => {
+    if (s === item) return true;
+    // Only do substring matching for items longer than 2 chars to avoid false positives (e.g. 'c' matching 'react')
+    if (item.length > 2 && s.includes(item)) return true;
+    if (item.length > 2 && s.length > 2 && item.includes(s)) return true;
+    return false;
+  });
+}
+
 /**
- * Build technical skills section
+ * Build technical skills section — always emits exactly 3 \textbf lines.
+ * @param {Array} skillEntries
+ * @param {{hardSkills?: string[], roleKeywords?: string[]}} [keywords]
  */
-function buildSkills(skillEntries) {
+function buildSkills(skillEntries, keywords) {
   if (!skillEntries || skillEntries.length === 0) {
     return '';
   }
-  
+
+  const jdKeywords = [
+    ...((keywords && keywords.hardSkills) || []),
+    ...((keywords && keywords.roleKeywords) || []),
+  ];
+
+  // Collect every individual skill token from all entries
+  const allSkills = [];
+  skillEntries.forEach(entry => {
+    (entry.bullets || []).forEach(bullet => {
+      const text = bullet.text || '';
+      const colonIndex = text.indexOf(':');
+      const valuesStr = colonIndex > 0 ? text.substring(colonIndex + 1) : text;
+      valuesStr.split(',').map(s => s.trim()).filter(Boolean).forEach(s => allSkills.push(s));
+    });
+    (entry.tags || []).forEach(t => {
+      if (t && t.trim()) allSkills.push(t.trim());
+    });
+  });
+
+  // Deduplicate (case-insensitive, keep first casing)
+  const seen = new Set();
+  const uniqueSkills = allSkills.filter(s => {
+    const key = s.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  if (uniqueSkills.length === 0) return '';
+
+  // Bucket assignment: DB/testing/tools take priority over lang to avoid false positives (e.g. PostgreSQL contains "sql")
+  const isDb = s => matchesList(s, DB_LIST);
+  const isTesting = s => matchesList(s, TESTING_LIST);
+  const isFramework = s => matchesList(s, FRAMEWORK_LIST);
+  const isLang = s => !isDb(s) && !isTesting(s) && !isFramework(s) && matchesList(s, LANG_LIST);
+
+  const langs = uniqueSkills.filter(s => isLang(s));
+  const frameworks = uniqueSkills.filter(s => !isLang(s) && isFramework(s) && !isDb(s) && !isTesting(s));
+  const remainder = uniqueSkills.filter(s => !isLang(s) && !isFramework(s));
+
+  // Determine third bucket label and content
+  const jdLower = jdKeywords.map(k => k.toLowerCase());
+  let thirdLabel;
+  let thirdSkills;
+
+  if (DB_LIST.some(db => jdLower.some(k => k.includes(db)))) {
+    thirdLabel = 'Databases';
+    thirdSkills = remainder.filter(s => matchesList(s, DB_LIST));
+    if (thirdSkills.length === 0) thirdSkills = remainder.filter(s => matchesList(s, DB_LIST.concat(['database', 'db'])));
+    if (thirdSkills.length === 0) thirdSkills = remainder;
+  } else if (TESTING_LIST.some(t => jdLower.some(k => k.includes(t)))) {
+    thirdLabel = 'Testing';
+    thirdSkills = remainder.filter(s => matchesList(s, TESTING_LIST));
+    if (thirdSkills.length === 0) thirdSkills = remainder;
+  } else {
+    thirdLabel = 'Developer Tools';
+    thirdSkills = remainder;
+  }
+
+  const renderLine = (label, skills) => {
+    if (skills.length === 0) return null;
+    const ordered = jdKeywords.length > 0 ? reorderTags(skills, jdKeywords) : skills;
+    return `      \\textbf{${latexEscape(label)}}{: ${ordered.map(s => latexEscape(s)).join(', ')}} \\\\`;
+  };
+
+  const skillLines = [
+    renderLine('Programming Languages', langs),
+    renderLine('Frameworks / Technologies', frameworks),
+    renderLine(thirdLabel, thirdSkills),
+  ].filter(Boolean);
+
+  if (skillLines.length === 0) return '';
+
   let section = `%-----------TECHNICAL SKILLS-----------
 \\section{Technical Skills}
  \\begin{itemize}[leftmargin=0.15in, label={}]
     \\small{\\item{
 `;
-  
-  const skillLines = [];
-  
-  skillEntries.forEach(skill => {
-    const hasBullets = skill.bullets && skill.bullets.length > 0;
-    const hasTags = skill.tags && skill.tags.length > 0;
-
-    if (hasBullets) {
-      // Bullet-based format: "Category: skill1, skill2, ..."
-      (skill.bullets || []).forEach(bullet => {
-        const text = bullet.text || '';
-        const colonIndex = text.indexOf(':');
-
-        if (colonIndex > 0 && colonIndex < 30) {
-          const category = latexEscape(text.substring(0, colonIndex).trim());
-          const values = latexEscape(text.substring(colonIndex + 1).trim());
-          skillLines.push(`      \\textbf{${category}}{: ${values}} \\\\`);
-        } else {
-          skillLines.push(`      ${latexEscape(text)} \\\\`);
-        }
-      });
-    } else if (hasTags) {
-      // Tags-based format: construct line from title (category) + tags (skills)
-      const category = latexEscape(skill.title || '');
-      const values = skill.tags.map(t => latexEscape(t)).join(', ');
-      if (category && values) {
-        skillLines.push(`      \\textbf{${category}}{: ${values}} \\\\`);
-      }
-    }
-  });
-
-  // If no skill lines were generated, omit the entire section
-  if (skillLines.length === 0) {
-    return '';
-  }
 
   section += skillLines.join('\n');
-  
   section += `
     }}
  \\end{itemize}
 
 `;
-  
+
   return section;
 }
 
@@ -450,9 +529,9 @@ export function build(selectedExperiences, rewrittenMap, jobInfo, user, keywords
 
   latex += buildHeading(user);
   latex += buildEducation(education);
+  latex += buildSkills(skills, keywords);
   latex += buildExperience(work, rewrittenMap, boldList);
-  latex += buildProjects(projects, rewrittenMap, boldList);
-  latex += buildSkills(skills);
+  latex += buildProjects(projects, rewrittenMap, boldList, keywords);
 
   latex += TEMPLATE_END;
 

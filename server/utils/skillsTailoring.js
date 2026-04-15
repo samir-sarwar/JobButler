@@ -154,4 +154,6 @@ export function tailorSkills(skillEntries, keywords) {
   return copies;
 }
 
-export default { tailorSkills };
+export { reorderTags };
+
+export default { tailorSkills, reorderTags };
