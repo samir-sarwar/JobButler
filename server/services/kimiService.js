@@ -17,7 +17,7 @@ export class KimiAPIError extends Error {
   }
 }
 
-// Initialize LLM client (Groq-hosted Kimi K2, OpenAI-compatible)
+// Initialize LLM client (Groq-hosted GPT-OSS-120B, OpenAI-compatible)
 const llm = new OpenAI({
   apiKey: process.env.LLM_API_KEY,
   baseURL: process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1',
@@ -273,32 +273,8 @@ Select the experiences that best position this candidate for the target role. Us
   return selectedIds;
 }
 
-/**
- * Stage 3: Rewrite bullet points for work/project entries
- * @param {Array} selectedExperiences - Only work/project types
- * @param {{hardSkills: string[], softSkills: string[], roleKeywords: string[], coreResponsibilities: string[], seniorityLevel: string}} keywords
- * @param {string} jobDescription - Raw job description text for context
- * @returns {Promise<Object.<string, string[]>>} - Map of experience _id → rewritten bullets
- */
-export async function rewriteBullets(selectedExperiences, keywords, jobDescription = '') {
-  // Filter to only work and project types
-  const workAndProject = selectedExperiences.filter(
-    exp => exp.type === 'work' || exp.type === 'project'
-  );
-
-  if (workAndProject.length === 0) {
-    return {};
-  }
-
-  const experiencesForRewrite = workAndProject.map(exp => ({
-    id: exp._id.toString(),
-    type: exp.type,
-    title: exp.title,
-    organization: exp.organization || '',
-    bullets: (exp.bullets || []).map(b => b.text),
-  }));
-
-  const systemPrompt = `You are an expert resume writer crafting bullet points tailored to a specific job application.
+// Shared system prompt used for each per-experience rewrite call.
+const REWRITE_SYSTEM_PROMPT = `You are an expert resume writer crafting bullet points tailored to a specific job application.
 
 REWRITING PRINCIPLES:
 1. Each rewritten bullet should be rooted in the general area of work described by the original bullet — the candidate did work in that domain, and you are presenting it in the best possible light for this specific JD
@@ -318,15 +294,25 @@ OPTIMIZATION GOALS (actively pursue all of these):
 6. Target 120–180 characters per bullet (approximately 1.5–2 lines on a standard resume)
 7. Make each bullet self-contained and impressive — a reader should come away thinking the candidate is a strong match for the role. Add qualitative impact phrases when no metrics exist (e.g., "improving system reliability", "enabling faster iteration across teams", "reducing operational overhead")
 
-NARRATIVE GUIDANCE:
-- The most relevant experience entry to the target role should have the strongest, most detailed bullets (3–4 bullets)
-- Less relevant entries can be more concise (2–3 bullets)
-- Across all entries, the bullets should collectively demonstrate that the candidate has the skills and experience described in the job description
+OUTPUT:
+Return ONLY a JSON array of 3–4 rewritten bullet strings for this single experience entry.
+Format: ["bullet1", "bullet2", "bullet3", "bullet4"]
 
-Return ONLY a valid JSON object mapping experience ID to rewritten bullets array.
-Format: { "[id]": ["bullet1", "bullet2", ...] }
+DO NOT include any explanation, markdown, code fences, or wrapping object.`;
 
-DO NOT include any explanation, markdown, or code fences.`;
+/**
+ * Rewrite bullets for a single experience via one LLM call.
+ * Throws KimiAPIError on network/API failure; returns null on parse failure
+ * so the caller can fall back to originals for this one entry.
+ */
+async function rewriteOneExperience(experience, keywords, jobDescription) {
+  const payload = {
+    id: experience._id.toString(),
+    type: experience.type,
+    title: experience.title,
+    organization: experience.organization || '',
+    bullets: (experience.bullets || []).map(b => b.text),
+  };
 
   const userMessage = `JOB DESCRIPTION (use this to inform your rewriting angle and adopt its terminology):
 <job_description>
@@ -336,52 +322,82 @@ ${(jobDescription || '').substring(0, 4000)}
 TARGET JOB KEYWORDS:
 ${JSON.stringify(keywords, null, 2)}
 
-EXPERIENCE ENTRIES TO REWRITE:
-${JSON.stringify(experiencesForRewrite, null, 2)}
+EXPERIENCE ENTRY TO REWRITE:
+${JSON.stringify(payload, null, 2)}
 
-Rewrite each bullet to be aggressively tailored for this specific role. Maximize keyword overlap with the JD. Freely upgrade scope, add related technologies, and use the JD's exact terminology. Present the candidate as an ideal match. Only constraint: do not invent specific numbers or entirely fictional projects.`;
+Return a JSON array of 3–4 rewritten bullets for this single entry. Maximize keyword overlap with the JD. Freely upgrade scope, add related technologies, and use the JD's exact terminology. Only constraint: do not invent specific numbers or entirely fictional projects.`;
 
-  let response;
-  try {
-    response = await llm.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.6, // Higher creativity for aggressive JD-aligned rewriting
-    });
-  } catch (error) {
-    console.error('LLM API error (rewriteBullets):', error.message);
-    throw new KimiAPIError(`LLM API error: ${error.message}`, error.status || 502);
-  }
+  const response = await llm.chat.completions.create({
+    model: MODEL,
+    messages: [
+      { role: 'system', content: REWRITE_SYSTEM_PROMPT },
+      { role: 'user', content: userMessage },
+    ],
+    temperature: 0.6,
+  });
 
   const content = response.choices[0]?.message?.content;
-  if (DEBUG) console.log('LLM rewrite response:', content?.substring(0, 500));
-  
-  let rewrittenMap;
-  
+  if (DEBUG) console.log(`LLM rewrite response for ${payload.id}:`, content?.substring(0, 300));
+
   try {
-    rewrittenMap = parseKimiJSON(content);
+    const parsed = parseKimiJSON(content);
+    if (Array.isArray(parsed)) return parsed;
+    // Tolerate a wrapping object keyed by id (older prompt shape)
+    if (parsed && typeof parsed === 'object') {
+      const firstValue = parsed[payload.id] ?? Object.values(parsed)[0];
+      if (Array.isArray(firstValue)) return firstValue;
+    }
+    return null;
   } catch (parseError) {
-    console.error('LLM parse error (rewriteBullets):', parseError.message);
-    // Fall back to original bullets
-    rewrittenMap = {};
+    console.error(`LLM parse error (rewriteBullets, id=${payload.id}):`, parseError.message);
+    return null;
+  }
+}
+
+/**
+ * Stage 3: Rewrite bullet points for work/project entries.
+ * Fires one LLM call per experience in parallel — reduces Stage 3 latency from
+ * sum-of-all to max-of-one.
+ *
+ * @param {Array} selectedExperiences - Only work/project types
+ * @param {{hardSkills: string[], softSkills: string[], roleKeywords: string[], coreResponsibilities: string[], seniorityLevel: string}} keywords
+ * @param {string} jobDescription - Raw job description text for context
+ * @returns {Promise<Object.<string, string[]>>} - Map of experience _id → rewritten bullets
+ */
+export async function rewriteBullets(selectedExperiences, keywords, jobDescription = '') {
+  const workAndProject = selectedExperiences.filter(
+    exp => exp.type === 'work' || exp.type === 'project'
+  );
+
+  if (workAndProject.length === 0) {
+    return {};
   }
 
-  // Post-process: truncate long bullets and fall back to originals for missing IDs
+  if (DEBUG) console.log(`Rewriting ${workAndProject.length} experiences in parallel...`);
+
+  // Fan out one call per experience; settle individually so one failure doesn't
+  // tank the whole batch. Missing/null results fall back to originals below.
+  const outcomes = await Promise.allSettled(
+    workAndProject.map(exp => rewriteOneExperience(exp, keywords, jobDescription))
+  );
+
   const result = {};
-  
-  workAndProject.forEach(exp => {
+
+  workAndProject.forEach((exp, idx) => {
     const id = exp._id.toString();
-    let bullets = rewrittenMap[id];
-    
-    if (!bullets || !Array.isArray(bullets) || bullets.length === 0) {
-      // Fall back to original bullets
+    const outcome = outcomes[idx];
+    let bullets = null;
+
+    if (outcome.status === 'fulfilled' && Array.isArray(outcome.value) && outcome.value.length > 0) {
+      bullets = outcome.value;
+    } else {
+      if (outcome.status === 'rejected') {
+        console.warn(`Rewrite failed for ${id}, using originals:`, outcome.reason?.message);
+      }
       bullets = (exp.bullets || []).slice(0, 4).map(b => b.text);
     }
-    
-    // Truncate long bullets
+
+    // Truncate long bullets and cap at 4 per entry.
     result[id] = bullets.map(bullet => {
       if (bullet.length > 200) {
         const truncated = bullet.substring(0, 200);
@@ -389,10 +405,27 @@ Rewrite each bullet to be aggressively tailored for this specific role. Maximize
         return lastSpace > 140 ? truncated.substring(0, lastSpace) : truncated;
       }
       return bullet;
-    }).slice(0, 4); // Max 4 bullets
+    }).slice(0, 4);
   });
-  
+
   return result;
+}
+
+const SAMPLE_BLOCKLIST = [
+  'jake ryan',
+  'gitlytics',
+  'simple paintball',
+  'southwestern university',
+  'blinn college',
+  'sourabh bajaj',
+];
+
+function filterSampleContent(experiences) {
+  return experiences.filter(exp => {
+    const title = (exp.title || '').toLowerCase();
+    const org = (exp.organization || '').toLowerCase();
+    return !SAMPLE_BLOCKLIST.some(term => title.includes(term) || org.includes(term));
+  });
 }
 
 /**
@@ -403,6 +436,7 @@ Rewrite each bullet to be aggressively tailored for this specific role. Maximize
 export async function parseResume(resumeText) {
   const systemPrompt = `You are an expert resume parser. You will be given raw text extracted from a PDF resume.
 Your task is to parse and categorize the content into structured experience entries.
+If the resume text appears to be a template or sample (e.g. contains placeholder names like Jake Ryan, Sourabh Bajaj, or fake companies like Gitlytics, Simple Paintball, Southwestern University, Blinn College), reject those entries entirely — do not include them in the output.
 
 Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
 
@@ -465,51 +499,9 @@ ${resumeText}
 
   const content = response.choices[0]?.message?.content;
   
-  try {
-    const parsed = parseKimiJSON(content);
-    
-    // Validate and clean up the parsed data
-    const experiences = (parsed.experiences || []).map(exp => ({
-      type: ['work', 'project', 'education', 'skill'].includes(exp.type) ? exp.type : 'work',
-      title: (exp.title || '').substring(0, 120),
-      organization: exp.organization ? exp.organization.substring(0, 120) : null,
-      location: exp.location ? exp.location.substring(0, 80) : null,
-      startDate: exp.startDate ? exp.startDate.substring(0, 20) : null,
-      endDate: exp.endDate ? exp.endDate.substring(0, 20) : null,
-      bullets: (exp.bullets || [])
-        .filter(b => typeof b === 'string' && b.trim())
-        .slice(0, 8)
-        .map(b => ({ text: b.substring(0, 300) })),
-      tags: (exp.tags || [])
-        .filter(t => typeof t === 'string' && t.trim())
-        .slice(0, 20),
-      priority: 0,
-      visible: true,
-    }));
-    
-    return {
-      experiences,
-      personalInfo: parsed.personalInfo || {},
-    };
-  } catch (parseError) {
-    console.warn('First parse attempt failed, retrying with stricter prompt...');
-    
-    // Retry with stricter prompt
-    try {
-      const retryResponse = await llm.chat.completions.create({
-        model: MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userMessage },
-          { role: 'assistant', content: content },
-          { role: 'user', content: 'Your previous response was not valid JSON. Return ONLY the JSON object, nothing else.' },
-        ],
-        temperature: 0.0,
-      });
-      
-      const retryParsed = parseKimiJSON(retryResponse.choices[0]?.message?.content);
-      
-      const experiences = (retryParsed.experiences || []).map(exp => ({
+  function normalizeExperiences(rawList) {
+    return filterSampleContent(
+      (rawList || []).map(exp => ({
         type: ['work', 'project', 'education', 'skill'].includes(exp.type) ? exp.type : 'work',
         title: (exp.title || '').substring(0, 120),
         organization: exp.organization ? exp.organization.substring(0, 120) : null,
@@ -525,10 +517,37 @@ ${resumeText}
           .slice(0, 20),
         priority: 0,
         visible: true,
-      }));
-      
+      }))
+    );
+  }
+
+  try {
+    const parsed = parseKimiJSON(content);
+
+    return {
+      experiences: normalizeExperiences(parsed.experiences),
+      personalInfo: parsed.personalInfo || {},
+    };
+  } catch (parseError) {
+    console.warn('First parse attempt failed, retrying with stricter prompt...');
+
+    // Retry with stricter prompt
+    try {
+      const retryResponse = await llm.chat.completions.create({
+        model: MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage },
+          { role: 'assistant', content: content },
+          { role: 'user', content: 'Your previous response was not valid JSON. Return ONLY the JSON object, nothing else.' },
+        ],
+        temperature: 0.0,
+      });
+
+      const retryParsed = parseKimiJSON(retryResponse.choices[0]?.message?.content);
+
       return {
-        experiences,
+        experiences: normalizeExperiences(retryParsed.experiences),
         personalInfo: retryParsed.personalInfo || {},
       };
     } catch (retryError) {
