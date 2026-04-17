@@ -214,3 +214,23 @@ export const validateSessionsQuery = [
     .withMessage('Offset must be a non-negative integer'),
   validate,
 ];
+
+export const validatePreviewPdf = [
+  body('latex')
+    .isString()
+    .withMessage('latex must be a string')
+    .notEmpty()
+    .withMessage('latex is required')
+    .isLength({ max: 100000 })
+    .withMessage('latex cannot exceed 100,000 characters')
+    .custom((value) => {
+      if (!value.includes('\\documentclass')) {
+        throw new Error('latex must contain \\documentclass');
+      }
+      if (!value.includes('\\begin{document}')) {
+        throw new Error('latex must contain \\begin{document}');
+      }
+      return true;
+    }),
+  validate,
+];

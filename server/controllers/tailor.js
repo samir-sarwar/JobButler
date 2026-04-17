@@ -291,6 +291,31 @@ export const getSession = async (req, res, next) => {
 };
 
 /**
+ * Compile LaTeX to PDF for live preview (stateless)
+ * POST /api/tailor/preview-pdf
+ */
+export const previewPdf = async (req, res, next) => {
+  try {
+    const { latex } = req.body;
+    const pdfBuffer = await pdfService.compile(latex);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Length': pdfBuffer.length,
+    });
+    res.send(pdfBuffer);
+  } catch (error) {
+    if (error.code === 'latex_compile_error') {
+      return res.status(422).json({
+        code: 'latex_compile_error',
+        message: error.message,
+        log: error.log,
+      });
+    }
+    next(error);
+  }
+};
+
+/**
  * List all sessions for current user
  * GET /api/sessions
  */
