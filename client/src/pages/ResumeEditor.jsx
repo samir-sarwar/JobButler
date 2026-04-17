@@ -5,7 +5,7 @@ import { fetchSession, downloadPdf } from '../api';
 import Button from '../components/ui/Button';
 import StatusBar from '../components/editor/StatusBar';
 import EditorPanel from '../components/editor/EditorPanel';
-import LatexPreview from '../components/editor/LatexPreview';
+import PdfPreview from '../components/editor/PdfPreview';
 
 export default function ResumeEditor() {
   const { sessionId } = useParams();
@@ -74,9 +74,6 @@ export default function ResumeEditor() {
   const handleLatexChange = useCallback((newLatex) => {
     setLatex(newLatex);
   }, []);
-
-  // Build resumeData object for LatexPreview
-  const resumeData = { latex };
 
   if (isLoading) {
     return (
@@ -185,7 +182,7 @@ export default function ResumeEditor() {
 
           {/* Right: Live Preview */}
           <div>
-            <LatexPreview resumeData={resumeData} />
+            <PdfPreview latex={latex} />
           </div>
         </div>
       )}

@@ -70,6 +70,9 @@ export const tailorResume = async (data) => {
 export const downloadPdf = (sessionId) =>
   api.get(`/tailor/${sessionId}/pdf`, { responseType: 'blob' });
 
+export const previewPdf = (latex, signal) =>
+  api.post('/tailor/preview-pdf', { latex }, { responseType: 'arraybuffer', signal });
+
 // Sessions
 export const fetchSessions = async (params) => {
   const response = await api.get('/sessions', { params });
