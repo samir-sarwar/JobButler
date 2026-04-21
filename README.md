@@ -5,6 +5,11 @@
 JobButler is a MERN-stack web application that uses the **Kimi K2.5 API** to intelligently select and rewrite your work experience, projects, and skills to match a target job description. The output is a professionally formatted PDF built on the **Jake's Resume** LaTeX template.
 
 ---
+## Demo Video
+
+
+https://github.com/user-attachments/assets/e594012f-3518-4460-ab13-9cbc1e8c55b9
+
 
 ## How It Works
 
